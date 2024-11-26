@@ -126,17 +126,17 @@ package object cql {
       QueryTemplate[V, Row](
         ctx.parts
           .foldLeft[(HList, StringBuilder)]((params, new StringBuilder())) {
-            case ((Const(const) :: tail, builder), part)                => (tail, builder.appendAll(part).appendAll(const))
+            case ((Const(const) :: tail, builder), part)                  => (tail, builder.appendAll(part).appendAll(const))
             case (((restriction: KeyEqualsTo[_]) :: tail, builder), part) =>
               (tail, builder.appendAll(part).appendAll(restriction.keys.map(key => s"${key} = ?").mkString(" AND ")))
-            case (((assignment: Assignment[_]) :: tail, builder), part) =>
+            case (((assignment: Assignment[_]) :: tail, builder), part)   =>
               (tail, builder.appendAll(part).appendAll(assignment.keys.map(key => s"${key} = ?").mkString(", ")))
-            case (((columns: Columns[_]) :: tail, builder), part)       =>
+            case (((columns: Columns[_]) :: tail, builder), part)         =>
               (tail, builder.appendAll(part).appendAll(columns.keys.mkString(", ")))
-            case (((values: Values[_]) :: tail, builder), part)         =>
+            case (((values: Values[_]) :: tail, builder), part)           =>
               (tail, builder.appendAll(part).appendAll(List.fill(values.size)("?").mkString(", ")))
-            case ((_ :: tail, builder), part)                           => (tail, builder.appendAll(part).appendAll("?"))
-            case ((HNil, builder), part)                                => (HNil, builder.appendAll(part))
+            case ((_ :: tail, builder), part)                             => (tail, builder.appendAll(part).appendAll("?"))
+            case ((HNil, builder), part)                                  => (HNil, builder.appendAll(part))
           }
           ._2
           .toString(),
@@ -159,11 +159,13 @@ package object cql {
         override type Repr = HNil
         override def binder: Binder[HNil] = Binder[HNil]
       }
-      implicit def hConsBindableBuilder[T: Binder, PT <: HList, RT <: HList](implicit
+      implicit def hConsBindableBuilder[T, PT <: HList, RT <: HList](implicit
+        hBinder: Lazy[Binder[T]],
         f: BindableBuilder.Aux[PT, RT]
       ): BindableBuilder.Aux[Put[T] :: PT, T :: RT]                                            = new BindableBuilder[Put[T] :: PT] {
         override type Repr = T :: RT
         override def binder: Binder[T :: RT] = {
+          implicit val binder: Binder[T]   = hBinder.value
           implicit val tBinder: Binder[RT] = f.binder
           Binder[T :: RT]
         }
@@ -184,34 +186,37 @@ package object cql {
           override def binder: Binder[RT] = f.binder
         }
 
-      implicit def hConsBindableValuesBuilder[T: ColumnsValues, PT <: HList, RT <: HList](implicit
+      implicit def hConsBindableValuesBuilder[T, PT <: HList, RT <: HList](implicit
+        cv: Lazy[ColumnsValues[T]],
         f: BindableBuilder.Aux[PT, RT]
       ): BindableBuilder.Aux[Values[T] :: PT, T :: RT] = new BindableBuilder[Values[T] :: PT] {
         override type Repr = T :: RT
         override def binder: Binder[T :: RT] = {
-          implicit val hBinder: Binder[T]  = Values[T].binder
+          implicit val hBinder: Binder[T]  = cv.value.binder
           implicit val tBinder: Binder[RT] = f.binder
           Binder[T :: RT]
         }
       }
 
-      implicit def hConsBindableRestrictionsBuilder[T: ColumnsValues, PT <: HList, RT <: HList](implicit
+      implicit def hConsBindableRestrictionsBuilder[T, PT <: HList, RT <: HList](implicit
+        cv: Lazy[ColumnsValues[T]],
         f: BindableBuilder.Aux[PT, RT]
       ): BindableBuilder.Aux[KeyEqualsTo[T] :: PT, T :: RT] = new BindableBuilder[KeyEqualsTo[T] :: PT] {
         override type Repr = T :: RT
         override def binder: Binder[T :: RT] = {
-          implicit val hBinder: Binder[T]  = Values[T].binder
+          implicit val hBinder: Binder[T]  = cv.value.binder
           implicit val tBinder: Binder[RT] = f.binder
           Binder[T :: RT]
         }
       }
 
-      implicit def hConsBindableAssignmentsBuilder[T: ColumnsValues, PT <: HList, RT <: HList](implicit
+      implicit def hConsBindableAssignmentsBuilder[T, PT <: HList, RT <: HList](implicit
+        cv: Lazy[ColumnsValues[T]],
         f: BindableBuilder.Aux[PT, RT]
       ): BindableBuilder.Aux[Assignment[T] :: PT, T :: RT] = new BindableBuilder[Assignment[T] :: PT] {
         override type Repr = T :: RT
         override def binder: Binder[T :: RT] = {
-          implicit val hBinder: Binder[T]  = Values[T].binder
+          implicit val hBinder: Binder[T]  = cv.value.binder
           implicit val tBinder: Binder[RT] = f.binder
           Binder[T :: RT]
         }
@@ -311,19 +316,19 @@ package object cql {
   }
 
   case class Const(fragment: String)
-  trait Columns[T] {
+  trait Columns[T]   {
     def keys: List[String]
   }
-  object Columns   {
+  object Columns     {
     def apply[T: ColumnsValues]: Columns[T] = new Columns[T] {
       override def keys: List[String] = ColumnsValues[T].keys
     }
   }
-  trait Values[T]  {
+  trait Values[T]    {
     def size: Int
     def binder: Binder[T]
   }
-  object Values    {
+  object Values      {
     def apply[T: ColumnsValues]: Values[T] = new Values[T] {
       override def size: Int         = ColumnsValues[T].size
       override def binder: Binder[T] = ColumnsValues[T].binder
@@ -534,14 +539,15 @@ package object cql {
   }
 
   trait BinderLowestPriority {
-    implicit val hNilBinder: Binder[HNil]                                   = new Binder[HNil] {
+    implicit val hNilBinder: Binder[HNil]                                                                          = new Binder[HNil] {
       override def bind(statement: BoundStatement, index: Int, value: HNil): (BoundStatement, Int) = (statement, index)
     }
-    implicit def hConsBinder[H: Binder, T <: HList: Binder]: Binder[H :: T] = new Binder[H :: T] {
-      override def bind(statement: BoundStatement, index: Int, value: H :: T): (BoundStatement, Int) = {
-        val (applied, nextIndex) = Binder[H].bind(statement, index, value.head)
-        Binder[T].bind(applied, nextIndex, value.tail)
+    implicit def hConsBinder[H, T <: HList](implicit hBinder: Lazy[Binder[H]], tBinder: Binder[T]): Binder[H :: T] =
+      new Binder[H :: T] {
+        override def bind(statement: BoundStatement, index: Int, value: H :: T): (BoundStatement, Int) = {
+          val (applied, nextIndex) = hBinder.value.bind(statement, index, value.head)
+          tBinder.bind(applied, nextIndex, value.tail)
+        }
       }
-    }
   }
 }
